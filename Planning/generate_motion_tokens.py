@@ -3,6 +3,7 @@ import os
 import codecs as cs
 from os.path import join as pjoin
 
+import json
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -14,9 +15,11 @@ def get_dataset_paths(dataname: str):
     if dataname == "t2m":
         root = "../HumanML3D"
         meta_dir = "checkpoints/t2m/VQVAEV3_CB1024_CMT_H1024_NRES3/meta"
+        texts_dir = pjoin(root, "texts")
     elif dataname == "kit":
         root = "./dataset/KIT-ML"
         meta_dir = "checkpoints/kit/VQVAEV3_CB1024_CMT_H1024_NRES3/meta"
+        texts_dir = pjoin(root, "texts")
     else:
         raise ValueError(f"Unknown dataname {dataname}")
 
@@ -25,7 +28,7 @@ def get_dataset_paths(dataname: str):
     mean_path = pjoin(meta_dir, "mean.npy")
     std_path = pjoin(meta_dir, "std.npy")
 
-    return motion_dir, split_file, mean_path, std_path
+    return motion_dir, split_file, mean_path, std_path, texts_dir
 
 
 def build_arg_parser():
@@ -62,6 +65,23 @@ def build_arg_parser():
     parser.add_argument(
         "--device", type=str, default="cuda", help="Device to run encoding (cuda/cpu)."
     )
+    parser.add_argument(
+        "--compute-verbs",
+        action="store_true",
+        help="Aggregate token representations for verbs using HumanML3D/texts.",
+    )
+    parser.add_argument(
+        "--texts-dir",
+        type=str,
+        default=None,
+        help="Directory containing text annotations (e.g., HumanML3D/texts).",
+    )
+    parser.add_argument(
+        "--verb-json",
+        type=str,
+        default=None,
+        help="Output JSON path for verb representations. Defaults to <out-dir>/verb_representations.json.",
+    )
     return parser
 
 
@@ -73,11 +93,32 @@ def load_ids(split_file):
     return ids
 
 
+def parse_verbs_from_tags(tagged_sentence: str):
+    verbs = []
+    for token in tagged_sentence.strip().split():
+        if "/" not in token:
+            continue
+        word, pos = token.rsplit("/", 1)
+        if pos == "VERB":
+            verbs.append(word.lower())
+    return verbs
+
+
+def upsample_sequence(seq: np.ndarray, target_len: int):
+    if len(seq) == target_len:
+        return seq.astype(np.float32)
+    if len(seq) == 1:
+        return np.repeat(seq.astype(np.float32), target_len)
+    x_old = np.linspace(0.0, 1.0, num=len(seq), dtype=np.float32)
+    x_new = np.linspace(0.0, 1.0, num=target_len, dtype=np.float32)
+    return np.interp(x_new, x_old, seq.astype(np.float32))
+
+
 def main():
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    motion_dir, split_file, mean_path, std_path = get_dataset_paths(args.dataname)
+    motion_dir, split_file, mean_path, std_path, default_texts_dir = get_dataset_paths(args.dataname)
     mean = np.load(mean_path)
     std = np.load(std_path)
 
@@ -86,6 +127,13 @@ def main():
         root = "./dataset/HumanML3D" if args.dataname == "t2m" else "./dataset/KIT-ML"
         args.out_dir = pjoin(root, args.exp_name)
     os.makedirs(args.out_dir, exist_ok=True)
+    if args.compute_verbs:
+        if args.texts_dir is None:
+            args.texts_dir = default_texts_dir
+        if args.verb_json is None:
+            args.verb_json = pjoin(args.out_dir, "verb_representations.json")
+        if not os.path.isdir(args.texts_dir):
+            raise FileNotFoundError(f"Texts directory not found: {args.texts_dir}")
 
     # Build model
     vq_args = argparse.Namespace(
@@ -128,6 +176,9 @@ def main():
     ids = load_ids(split_file)
     print(f"Found {len(ids)} motions. Saving tokens to {args.out_dir}")
 
+    verb_to_segments = {}
+    verb_to_motion_ids = {}
+
     with torch.no_grad():
         for name in tqdm(ids):
             motion_path = pjoin(motion_dir, name + ".npy")
@@ -147,6 +198,47 @@ def main():
             token_seq = token_seq.cpu().numpy()
 
             np.save(pjoin(args.out_dir, name + ".npy"), token_seq)
+            if not args.compute_verbs:
+                continue
+
+            text_path = pjoin(args.texts_dir, name + ".txt")
+            if not os.path.exists(text_path):
+                continue
+
+            token_seq_1d = token_seq.reshape(-1)
+            with cs.open(text_path, "r") as f:
+                for line in f.readlines():
+                    parts = line.strip().split("#")
+                    if len(parts) < 2:
+                        continue
+                    verbs = parse_verbs_from_tags(parts[1])
+                    if not verbs:
+                        continue
+                    if len(verbs) == 1:
+                        segments = [token_seq_1d]
+                    else:
+                        segments = np.array_split(token_seq_1d, len(verbs))
+
+                    for verb, segment in zip(verbs, segments):
+                        verb_to_segments.setdefault(verb, []).append(segment)
+                        verb_to_motion_ids.setdefault(verb, set()).add(name)
+
+    if args.compute_verbs:
+        verb_entries = []
+        for verb, segments in verb_to_segments.items():
+            target_len = max(len(s) for s in segments)
+            upsampled = [upsample_sequence(s, target_len) for s in segments]
+            mean_rep = np.mean(np.stack(upsampled, axis=0), axis=0)
+            entry = {
+                "motion_ids": sorted(verb_to_motion_ids.get(verb, set())),
+                "verb_text": verb,
+                "verb_representation": mean_rep.tolist(),
+            }
+            verb_entries.append(entry)
+
+        verb_entries.sort(key=lambda x: x["verb_text"])
+        with cs.open(args.verb_json, "w") as f:
+            json.dump(verb_entries, f, indent=2)
 
 
 if __name__ == "__main__":

@@ -351,8 +351,9 @@ def evaluation_transformer_test(out_dir, val_loader, net, trans, logger, writer,
         text = clip.tokenize(clip_text, truncate=True).cuda()
 
         feat_clip_text = clip_model.encode_text(text).float()
+        print('feat_clip_text generated')
         motion_multimodality_batch = []
-        for i in range(30):
+        for i in range(4):
             pred_pose_eval = torch.zeros((bs, seq, pose.shape[-1])).cuda()
             pred_len = torch.ones(bs).long()
             
@@ -432,7 +433,7 @@ def evaluation_transformer_test(out_dir, val_loader, net, trans, logger, writer,
 
     multimodality = 0
     motion_multimodality = torch.cat(motion_multimodality, dim=0).cpu().numpy()
-    multimodality = calculate_multimodality(motion_multimodality, 10)
+    multimodality = calculate_multimodality(motion_multimodality, 3)
 
     fid = calculate_frechet_distance(gt_mu, gt_cov, mu, cov)
 
@@ -495,7 +496,7 @@ def evaluation_transformer_test_modified(out_dir, val_loader, llm_planner, net, 
         print(f"encoded_feat_clip generated")
 
         motion_multimodality_batch = []
-        for i in range(1):
+        for i in range(4):
             pred_pose_eval = torch.zeros((bs, seq, pose.shape[-1])).cuda()
             pred_len = torch.ones(bs).long()
             
@@ -575,7 +576,7 @@ def evaluation_transformer_test_modified(out_dir, val_loader, llm_planner, net, 
 
     multimodality = 0
     motion_multimodality = torch.cat(motion_multimodality, dim=0).cpu().numpy()
-    multimodality = calculate_multimodality(motion_multimodality, 10)
+    multimodality = calculate_multimodality(motion_multimodality, 3)
 
     fid = calculate_frechet_distance(gt_mu, gt_cov, mu, cov)
 

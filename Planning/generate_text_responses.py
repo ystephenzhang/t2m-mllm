@@ -271,11 +271,10 @@ def _generate_text_hf(
 
     out_ids = model.generate(**inputs, **kwargs)
     # take the first sequence
-    text = tokenizer.decode(out_ids[0], skip_special_tokens=True)
+    input_len = inputs["input_ids"].shape[-1]
+    gen_ids = out_ids[0, input_len:]
+    text = tokenizer.decode(gen_ids, skip_special_tokens=True)
 
-    # remove prompt echo if present
-    if text.startswith(prompt):
-        text = text[len(prompt):]
     return text.strip()
 
 
@@ -475,6 +474,8 @@ def you_think_generate(
         # Ask for N plans in one completion
         for attempt in range(cfg.max_attempts):
             txt = one_attempt(rng.randint(1, 10**9))
+            # print("------------------ you think generated text -----------------")
+            # print(txt)
 
             if cfg.output_mode == "json":
                 obj = _safe_json_extract(txt)

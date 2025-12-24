@@ -71,7 +71,7 @@ class Text2Motion_Transformer_Modified(nn.Module):
                 n_head=8, 
                 drop_out_rate=0.1, 
                 fc_rate=4,
-                n_ref=10):
+                n_ref=3):
         super().__init__()
         self.trans_base = CrossCondTransBase(num_vq, embed_dim, clip_dim, block_size, num_layers, n_head, drop_out_rate, fc_rate)
         self.trans_head = CrossCondTransHead(num_vq, embed_dim, block_size, num_layers, n_head, drop_out_rate, fc_rate)
@@ -89,14 +89,23 @@ class Text2Motion_Transformer_Modified(nn.Module):
 
     def sample(self, clip_features, if_categorial=False):
         output = []
-        for idx, clip_feature in enumerate(clip_features):
-            for k in range(self.block_size):
-                if idx == 0 and k == 0:
-                    x = []
-                elif idx != 0 and k == 0:
-                    x = output[:,-self.n_ref:]
-                else:
+        max_input_len = self.block_size - 1
+        for seg_idx, clip_feature in enumerate(clip_features):
+            if seg_idx == 0:
+                generate_len = max_input_len
+                current_context = []
+            else:
+                generate_len = max_input_len - self.n_ref
+                current_context = output[:, -self.n_ref:]
+
+            xs = None
+            for k in range(generate_len):
+                if k == 0:
+                    x = current_context
+                elif seg_idx == 0:
                     x = xs
+                else:
+                    x = torch.cat((current_context, xs), dim=1)
                 logits = self.forward(x, clip_feature)
                 logits = logits[:, -1, :]
                 probs = F.softmax(logits, dim=-1)
@@ -119,11 +128,11 @@ class Text2Motion_Transformer_Modified(nn.Module):
                 if k == self.block_size - 1:
                     xs = xs[:, :-1]
                     break
-            if idx == 0:
+            if seg_idx == 0:
                 output = xs
             else:
-                output = torch.cat((output, xs))
-        return xs
+                output = torch.cat((output, xs),dim=1)
+        return output
 
 class CausalCrossConditionalSelfAttention(nn.Module):
 

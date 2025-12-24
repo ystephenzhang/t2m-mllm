@@ -256,11 +256,10 @@ def main():
         for verb, segments in verb_to_segments.items():
             target_len = max(len(s) for s in segments)
             upsampled = [upsample_sequence(s, target_len) for s in segments]
-            mean_rep = np.mean(np.stack(upsampled, axis=0), axis=0)
             entry = {
                 "motion_ids": sorted(verb_to_motion_ids.get(verb, set())),
                 "verb_text": verb,
-                "verb_representation": mean_rep.tolist(),
+                "verb_representation": np.stack(upsampled, axis=0).tolist(),
             }
             verb_entries.append(entry)
 

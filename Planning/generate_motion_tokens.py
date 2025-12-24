@@ -36,7 +36,12 @@ def build_arg_parser():
         description="Generate motion tokens for all training motions using a pretrained VQ-VAE."
     )
     parser.add_argument("--dataname", type=str, default="t2m", choices=["t2m", "kit"])
-    parser.add_argument("--resume-pth", type=str, required=True, help="VQ-VAE checkpoint (.pth) with key 'net'.")
+    parser.add_argument(
+        "--resume-pth",
+        type=str,
+        required=False,
+        help="VQ-VAE checkpoint (.pth) with key 'net' (required unless --tokens-dir is set).",
+    )
     parser.add_argument(
         "--out-dir",
         type=str,
@@ -82,6 +87,12 @@ def build_arg_parser():
         default=None,
         help="Output JSON path for verb representations. Defaults to <out-dir>/verb_representations.json.",
     )
+    parser.add_argument(
+        "--tokens-dir",
+        type=str,
+        default=None,
+        help="Directory containing precomputed <motion>.npy token files. Skips VQ-VAE encoding when set.",
+    )
     return parser
 
 
@@ -119,8 +130,11 @@ def main():
     args = parser.parse_args()
 
     motion_dir, split_file, mean_path, std_path, default_texts_dir = get_dataset_paths(args.dataname)
-    mean = np.load(mean_path)
-    std = np.load(std_path)
+    mean = None
+    std = None
+    if args.tokens_dir is None:
+        mean = np.load(mean_path)
+        std = np.load(std_path)
 
     # Output dir
     if args.out_dir is None:
@@ -135,69 +149,83 @@ def main():
         if not os.path.isdir(args.texts_dir):
             raise FileNotFoundError(f"Texts directory not found: {args.texts_dir}")
 
-    # Build model
-    vq_args = argparse.Namespace(
-        dataname=args.dataname,
-        quantizer=args.quantizer,
-        mu=0.99,
-        beta=1.0,
-        vq_act=args.vq_act,
-        vq_norm=args.vq_norm,
-        down_t=args.down_t,
-        stride_t=args.stride_t,
-        width=args.width,
-        depth=args.depth,
-        dilation_growth_rate=args.dilation_growth_rate,
-        output_emb_width=args.output_emb_width,
-        code_dim=args.code_dim,
-    )
+    net = None
+    device = None
+    if args.tokens_dir is None:
+        if not args.resume_pth:
+            raise ValueError("--resume-pth is required unless --tokens-dir is set.")
+        # Build model
+        vq_args = argparse.Namespace(
+            dataname=args.dataname,
+            quantizer=args.quantizer,
+            mu=0.99,
+            beta=1.0,
+            vq_act=args.vq_act,
+            vq_norm=args.vq_norm,
+            down_t=args.down_t,
+            stride_t=args.stride_t,
+            width=args.width,
+            depth=args.depth,
+            dilation_growth_rate=args.dilation_growth_rate,
+            output_emb_width=args.output_emb_width,
+            code_dim=args.code_dim,
+        )
 
-    net = vqvae.HumanVQVAE(
-        vq_args,
-        nb_code=args.nb_code,
-        code_dim=args.code_dim,
-        output_emb_width=args.output_emb_width,
-        down_t=args.down_t,
-        stride_t=args.stride_t,
-        width=args.width,
-        depth=args.depth,
-        dilation_growth_rate=args.dilation_growth_rate,
-        activation=args.vq_act,
-        norm=args.vq_norm,
-    )
+        net = vqvae.HumanVQVAE(
+            vq_args,
+            nb_code=args.nb_code,
+            code_dim=args.code_dim,
+            output_emb_width=args.output_emb_width,
+            down_t=args.down_t,
+            stride_t=args.stride_t,
+            width=args.width,
+            depth=args.depth,
+            dilation_growth_rate=args.dilation_growth_rate,
+            activation=args.vq_act,
+            norm=args.vq_norm,
+        )
 
-    ckpt = torch.load(args.resume_pth, map_location="cpu")
-    net.load_state_dict(ckpt["net"], strict=True)
-    net.eval()
-    device = torch.device(args.device)
-    net.to(device)
+        ckpt = torch.load(args.resume_pth, map_location="cpu")
+        net.load_state_dict(ckpt["net"], strict=True)
+        net.eval()
+        device = torch.device(args.device)
+        net.to(device)
 
     unit_length = 2 ** args.down_t  # keep lengths aligned with the VQ encoder
     ids = load_ids(split_file)
-    print(f"Found {len(ids)} motions. Saving tokens to {args.out_dir}")
+    if args.tokens_dir is None:
+        print(f"Found {len(ids)} motions. Saving tokens to {args.out_dir}")
+    else:
+        print(f"Found {len(ids)} motions. Loading tokens from {args.tokens_dir}")
 
     verb_to_segments = {}
     verb_to_motion_ids = {}
 
     with torch.no_grad():
         for name in tqdm(ids):
-            motion_path = pjoin(motion_dir, name + ".npy")
-            if not os.path.exists(motion_path):
-                continue
-            motion = np.load(motion_path)
-            if len(motion) < unit_length:
-                continue
+            if args.tokens_dir is None:
+                motion_path = pjoin(motion_dir, name + ".npy")
+                if not os.path.exists(motion_path):
+                    continue
+                motion = np.load(motion_path)
+                if len(motion) < unit_length:
+                    continue
 
-            # trim to a multiple of the unit_length to match the temporal stride
-            T = (len(motion) // unit_length) * unit_length
-            motion = motion[:T]
-            motion_norm = (motion - mean) / std
+                # trim to a multiple of the unit_length to match the temporal stride
+                T = (len(motion) // unit_length) * unit_length
+                motion = motion[:T]
+                motion_norm = (motion - mean) / std
 
-            motion_tensor = torch.from_numpy(motion_norm).unsqueeze(0).to(device=device, dtype=torch.float32)
-            token_seq = net.encode(motion_tensor)  # (1, L)
-            token_seq = token_seq.cpu().numpy()
+                motion_tensor = torch.from_numpy(motion_norm).unsqueeze(0).to(device=device, dtype=torch.float32)
+                token_seq = net.encode(motion_tensor)  # (1, L)
+                token_seq = token_seq.cpu().numpy()
+                np.save(pjoin(args.out_dir, name + ".npy"), token_seq)
+            else:
+                token_path = pjoin(args.tokens_dir, name + ".npy")
+                if not os.path.exists(token_path):
+                    continue
+                token_seq = np.load(token_path)
 
-            np.save(pjoin(args.out_dir, name + ".npy"), token_seq)
             if not args.compute_verbs:
                 continue
 

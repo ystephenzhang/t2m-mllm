@@ -76,6 +76,14 @@ def build_arg_parser():
         help="Aggregate token representations for verbs using HumanML3D/texts.",
     )
     parser.add_argument(
+        "--cluster-verbs",
+        action="store_true",
+        help="Cluster verb token sequences and store medoid token sequences.",
+    )
+    parser.add_argument("--cluster-k", type=int, default=3, help="Clusters per verb.")
+    parser.add_argument("--cluster-seed", type=int, default=123, help="Random seed for k-means.")
+    parser.add_argument("--cluster-max-iter", type=int, default=50, help="Max k-means iterations.")
+    parser.add_argument(
         "--texts-dir",
         type=str,
         default=None,
@@ -123,6 +131,32 @@ def upsample_sequence(seq: np.ndarray, target_len: int):
     x_old = np.linspace(0.0, 1.0, num=len(seq), dtype=np.float32)
     x_new = np.linspace(0.0, 1.0, num=target_len, dtype=np.float32)
     return np.interp(x_new, x_old, seq.astype(np.float32))
+
+
+def kmeans_features(X: np.ndarray, k: int, max_iter: int, seed: int):
+    rng = np.random.RandomState(seed)
+    n = X.shape[0]
+    if k >= n:
+        labels = np.arange(n)
+        centers = X.copy()
+        return centers, labels
+    indices = rng.choice(n, size=k, replace=False)
+    centers = X[indices].copy()
+    for _ in range(max_iter):
+        dists = ((X[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+        labels = dists.argmin(axis=1)
+        new_centers = centers.copy()
+        for c in range(k):
+            mask = labels == c
+            if not np.any(mask):
+                new_centers[c] = X[rng.randint(0, n)]
+            else:
+                new_centers[c] = X[mask].mean(axis=0)
+        shift = np.linalg.norm(new_centers - centers)
+        centers = new_centers
+        if shift < 1e-4:
+            break
+    return centers, labels
 
 
 def main():
@@ -200,6 +234,7 @@ def main():
 
     verb_to_segments = {}
     verb_to_motion_ids = {}
+    verb_to_segment_ids = {}
 
     with torch.no_grad():
         for name in tqdm(ids):
@@ -250,6 +285,7 @@ def main():
                     for verb, segment in zip(verbs, segments):
                         verb_to_segments.setdefault(verb, []).append(segment)
                         verb_to_motion_ids.setdefault(verb, set()).add(name)
+                        verb_to_segment_ids.setdefault(verb, []).append(name)
 
     if args.compute_verbs:
         verb_entries = []
@@ -261,6 +297,28 @@ def main():
                 "verb_text": verb,
                 "verb_representation": np.stack(upsampled, axis=0).tolist(),
             }
+
+            if args.cluster_verbs:
+                X = np.stack([seq.reshape(-1) for seq in upsampled], axis=0)
+                k = min(args.cluster_k, X.shape[0])
+                centers, labels = kmeans_features(X, k, args.cluster_max_iter, args.cluster_seed)
+                clustered = []
+                clustered_motion_ids = []
+                segment_ids = verb_to_segment_ids.get(verb, [])
+                for c_idx in range(centers.shape[0]):
+                    mask = labels == c_idx
+                    if not np.any(mask):
+                        continue
+                    cluster_indices = np.where(mask)[0]
+                    dists = ((X[cluster_indices] - centers[c_idx]) ** 2).sum(axis=1)
+                    medoid_idx = int(cluster_indices[int(dists.argmin())])
+                    clustered.append(segments[medoid_idx].astype(int).tolist())
+                    clustered_motion_ids.append(
+                        segment_ids[medoid_idx] if medoid_idx < len(segment_ids) else None
+                    )
+                entry["clustered_representation"] = clustered
+                entry["clustered_motion_ids"] = clustered_motion_ids
+
             verb_entries.append(entry)
 
         verb_entries.sort(key=lambda x: x["verb_text"])
